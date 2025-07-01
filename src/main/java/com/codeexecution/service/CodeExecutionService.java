@@ -1,9 +1,6 @@
 package com.codeexecution.service;
 
-import com.codeexecution.model.SubmissionRequest;
-import com.codeexecution.model.SubmissionResponse;
-import com.codeexecution.model.SubmissionResult;
-import com.codeexecution.model.TestCase;
+import com.codeexecution.model.*;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -29,7 +26,7 @@ public class CodeExecutionService {
         List<TestCase> testCases = testCaseLoaderService.loadTestCasesFromFiles(problemId);
         List<CompletableFuture<TestCaseResult>> futures = testCases.stream()
                 .map(testCase -> processTestCase(problemId, sourceCode, testCase, multiFile))
-                .collect(Collectors.toList());
+                .toList();
 
         CompletableFuture<Void> allOf = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
         return allOf.thenApply(v -> {
@@ -79,20 +76,5 @@ public class CodeExecutionService {
         return new ExecutionResult(allPassed, passedCount, results.size(), results);
     }
 
-    @RequiredArgsConstructor
-    @Data
-    public static class ExecutionResult {
-        private final boolean overallPassed;
-        private final int passedCount;
-        private final int totalCount;
-        private final List<TestCaseResult> testCaseResults;
-    }
 
-    @RequiredArgsConstructor
-    @Data
-    public static class TestCaseResult {
-        private final TestCase testCase;
-        private final SubmissionResult executionResult;
-        private final boolean passed;
-    }
 }

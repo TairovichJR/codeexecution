@@ -18,8 +18,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.Base64;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -43,11 +42,6 @@ public class Judge0Service {
 
         // Apply default constraints
         applyDefaultConstraints(request);
-
-        // Wrap Java code if needed
-        if (JAVA_LANGUAGE_ID == request.getLanguageId()) {
-            request.setSourceCode(wrapJavaCode(request.getSourceCode()));
-        }
 
         try {
             // Serialize request
@@ -139,33 +133,6 @@ public class Judge0Service {
         return response;
     }
 
-    private String wrapJavaCode(String userClassCode) {
-        return """
-            import java.util.*;
-            import java.util.stream.*;
-            
-            public class Main {
-                public static void main(String[] args) {
-                    Scanner scanner = new Scanner(System.in);
-                    
-                    // Read input count
-                    int n = scanner.nextInt();
-                    scanner.nextLine();  // Consume newline
-                    
-                    // Read main input
-                    List<Integer> arr = new ArrayList<>();
-                    for (int i = 0; i < n; i++) {
-                        arr.add(scanner.nextInt());
-                    }
-                    
-                    // Execute solution
-                    int result = Solution.migratoryBirds(arr);
-                    System.out.println(result);
-                }
-            }
-            """ + userClassCode;
-    }
-
     private void validateSubmissionRequest(SubmissionRequest request) {
         if (request.getLanguageId() == null) {
             throw new IllegalArgumentException("language_id is required");
@@ -198,11 +165,8 @@ public class Judge0Service {
 
     private ResponseEntity<String> executeJudge0Request(String url, HttpEntity<String> entity) {
         try {
-//            ResponseEntity<String> response = restTemplate.exchange(
-//                    url, HttpMethod.POST, entity, String.class
-//            );
-            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
 
+            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
                 log.error("Judge0 API error: {} - {}", response.getStatusCode(), response.getBody());
@@ -247,3 +211,5 @@ public class Judge0Service {
         }
     }
 }
+
+
