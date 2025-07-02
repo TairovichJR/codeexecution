@@ -12,170 +12,152 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.*;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 @RateLimiter(name = "judge0RateLimiter")
-@CircuitBreaker(name = "judge0CircuitBreaker", fallbackMethod = "fallbackHandler")
 public class Judge0Service {
     private static final int JAVA_LANGUAGE_ID = 62;
-    private static final int MULTI_FILE_LANGUAGE_ID = 89;
 
     private final RestTemplate restTemplate;
     private final Judge0Properties properties;
     private final ObjectMapper objectMapper;
 
     public SubmissionResponse submitSubmission(SubmissionRequest request) {
-        // Validate mandatory fields
-        validateSubmissionRequest(request);
+        return submitBatch(Collections.singletonList(request)).get(0);
+    }
 
-        // Apply default constraints
-        applyDefaultConstraints(request);
+    @CircuitBreaker(name = "judge0CircuitBreaker", fallbackMethod = "fallbackHandler")
+    public List<SubmissionResponse> submitBatch(List<SubmissionRequest> requests) {
+        requests.forEach(this::validateSubmissionRequest);
 
         try {
-            // Serialize request
-            String requestJson = objectMapper.writeValueAsString(request);
-            log.debug("Submitting to Judge0: {}", redactSensitive(requestJson));
+            // Wrap requests in a map to match Judge0's expected format
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("submissions", requests);
 
-            // Build headers and entity
+            String requestJson = objectMapper.writeValueAsString(requestBody);
+            log.debug("Submitting batch to Judge0: {}", redactSensitive(requestJson));
+
+            String url = String.format("%s/submissions/batch?base64_encoded=%b",
+                    properties.getBaseUrl(),
+                    properties.isBase64Encoded());
+
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
 
-            // Build URL
-            String url = buildSubmissionUrl();
+            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
 
-            // Execute request
-            ResponseEntity<String> response = executeJudge0Request(url, entity);
-
-            // Deserialize and return response
-            return objectMapper.readValue(response.getBody(), SubmissionResponse.class);
-        } catch (IOException e) {
-            log.error("JSON processing error", e);
-            throw new Judge0Exception("Failed to process JSON payload", e);
+            // Judge0 batch response is a list of maps like [{ token: "..." }, ...]
+            return objectMapper.readValue(
+                    response.getBody(),
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, SubmissionResponse.class)
+            );
+        } catch (Exception e) {
+            log.error("Error submitting batch to Judge0: {}", e.getMessage(), e);
+            throw new Judge0Exception("Failed to submit batch to Judge0: " + e.getMessage(), e);
         }
     }
+
 
     public SubmissionResult getSubmissionResult(String token) {
         try {
-            String url = properties.getBaseUrl() + "/submissions/" + token +
-                    "?base64_encoded=" + properties.isBase64Encoded();
+            String url = String.format("%s/submissions/%s?base64_encoded=%b",
+                    properties.getBaseUrl(),
+                    token,
+                    properties.isBase64Encoded());
 
-            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
+            ResponseEntity<SubmissionResult> response = restTemplate.getForEntity(
+                    url, SubmissionResult.class);
 
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                log.error("Failed to get submission: {} - {}", response.getStatusCode(), response.getBody());
-                throw new Judge0Exception("Judge0 API error: " + response.getStatusCode());
-            }
-
-            return objectMapper.readValue(response.getBody(), SubmissionResult.class);
-        } catch (IOException e) {
-            log.error("JSON deserialization error for token: {}", token, e);
-            throw new Judge0Exception("Failed to parse submission result", e);
-        } catch (HttpClientErrorException | HttpServerErrorException e) {
-            log.error("Judge0 API error: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw new Judge0Exception("Judge0 API error: " + e.getStatusCode(), e);
+            return response.getBody();
+        } catch (Exception e) {
+            log.error("Error getting submission result for token {}: {}", token, e.getMessage(), e);
+            throw new Judge0Exception("Failed to get submission result: " + e.getMessage(), e);
         }
     }
 
-    public SubmissionResult pollSubmissionResult(String token) {
-        int attempts = 0;
-        while (attempts < properties.getMaxPollingAttempts()) {
-            try {
-                SubmissionResult result = getSubmissionResult(token);
-                if (isProcessingComplete(result)) {
-                    return result;
+    public CompletableFuture<SubmissionResult> pollSubmissionResult(String token) {
+        return CompletableFuture.supplyAsync(() -> {
+            int attempts = 0;
+            int maxAttempts = properties.getMaxPollingAttempts();
+            long pollInterval = properties.getPollingIntervalMs();
+
+            while (attempts < maxAttempts) {
+                try {
+                    SubmissionResult result = getSubmissionResult(token);
+                    if (isProcessingComplete(result)) {
+                        log.debug("Submission {} completed after {} attempts", token, attempts + 1);
+                        return result;
+                    }
+
+                    if (attempts > 0 && attempts % 5 == 0) {
+                        log.debug("Polling attempt {}/{} for token {}", attempts, maxAttempts, token);
+                    }
+
+                    TimeUnit.MILLISECONDS.sleep(pollInterval);
+                    attempts++;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Polling interrupted for token: {}", token, e);
+                    throw new Judge0Exception("Polling interrupted for token: " + token, e);
+                } catch (Exception e) {
+                    log.error("Polling attempt {}/{} failed for token {}",
+                            attempts, maxAttempts, token, e);
+                    attempts++;
+
+                    try {
+                        long backoffTime = Math.min(
+                            (long) (pollInterval * Math.pow(1.5, attempts / 5)),
+                            10000L // Max 10 seconds
+                        );
+                        TimeUnit.MILLISECONDS.sleep(backoffTime);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new Judge0Exception("Backoff interrupted", ie);
+                    }
                 }
-                TimeUnit.MILLISECONDS.sleep(properties.getPollingIntervalMs());
-                attempts++;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new Judge0Exception("Polling interrupted", e);
-            } catch (Exception e) {
-                log.error("Polling attempt {} failed for token {}", attempts, token, e);
-                attempts++;
             }
-        }
-        throw new Judge0Exception("Max polling attempts exceeded for token: " + token);
-    }
 
-    public String createBase64Zip(Map<String, String> files) {
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-             ZipOutputStream zos = new ZipOutputStream(baos)) {
-
-            for (Map.Entry<String, String> entry : files.entrySet()) {
-                addFileToZip(zos, entry.getKey(), entry.getValue());
-            }
-            zos.finish();
-            return Base64.getEncoder().encodeToString(baos.toByteArray());
-        } catch (IOException e) {
-            throw new Judge0Exception("Failed to create zip file", e);
-        }
+            String errorMsg = String.format("Max polling attempts (%d) exceeded for token: %s",
+                    maxAttempts, token);
+            log.warn(errorMsg);
+            throw new Judge0Exception(errorMsg);
+        });
     }
 
     // Fallback method for circuit breaker
-    public SubmissionResponse fallbackHandler(SubmissionRequest request, Throwable t) {
+    public List<SubmissionResponse> fallbackHandler(List<SubmissionRequest> requests, Throwable t) {
         log.error("Judge0 service unavailable, using fallback", t);
-        SubmissionResponse response = new SubmissionResponse();
-        response.setToken("service-unavailable");
-        response.setError("Judge0 service is temporarily unavailable");
-        return response;
+        SubmissionResponse fallback = new SubmissionResponse();
+        fallback.setToken("service-unavailable");
+        fallback.setError("Judge0 service is temporarily unavailable");
+        // Return a fallback response for each submission
+        return Collections.nCopies(requests.size(), fallback);
     }
+
 
     private void validateSubmissionRequest(SubmissionRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Request cannot be null");
+        }
+
         if (request.getLanguageId() == null) {
-            throw new IllegalArgumentException("language_id is required");
+            request.setLanguageId(JAVA_LANGUAGE_ID);
         }
 
-        if (request.getLanguageId() == MULTI_FILE_LANGUAGE_ID) {
-            if (!StringUtils.hasText(request.getAdditionalFiles())) {
-                throw new IllegalArgumentException("additional_files is required for multi-file submissions");
-            }
-        } else {
-            if (!StringUtils.hasText(request.getSourceCode())) {
-                throw new IllegalArgumentException("source_code is required");
-            }
-        }
-    }
-
-    private void applyDefaultConstraints(SubmissionRequest request) {
-        if (request.getCpuTimeLimit() == null) {
-            request.setCpuTimeLimit(properties.getDefaultCpuTimeLimit());
-        }
-        if (request.getMemoryLimit() == null) {
-            request.setMemoryLimit(properties.getDefaultMemoryLimit());
-        }
-    }
-
-    private String buildSubmissionUrl() {
-        return properties.getBaseUrl() + "/submissions?base64_encoded=" +
-                properties.isBase64Encoded() + "&wait=false";
-    }
-
-    private ResponseEntity<String> executeJudge0Request(String url, HttpEntity<String> entity) {
-        try {
-
-            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
-
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                log.error("Judge0 API error: {} - {}", response.getStatusCode(), response.getBody());
-                throw new Judge0Exception("Judge0 API returned: " + response.getStatusCode());
-            }
-            return response;
-        } catch (HttpClientErrorException | HttpServerErrorException e) {
-            log.error("Judge0 API error: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw new Judge0Exception("Judge0 API error: " + e.getStatusCode(), e);
+        if (!StringUtils.hasText(request.getSourceCode())) {
+            throw new IllegalArgumentException("source_code is required");
         }
     }
 
@@ -183,20 +165,13 @@ public class Judge0Service {
         return result != null &&
                 result.getStatus() != null &&
                 result.getStatus().getId() != null &&
-                result.getStatus().getId() > 2;  // Status > 2 means not queued/processing
-    }
-
-    private void addFileToZip(ZipOutputStream zos, String fileName, String content) throws IOException {
-        ZipEntry zipEntry = new ZipEntry(fileName);
-        zos.putNextEntry(zipEntry);
-        zos.write(content.getBytes());
-        zos.closeEntry();
+                result.getStatus().getId() > 2;
     }
 
     private String redactSensitive(String json) {
         final int MAX_LENGTH = 500;
         if (json.length() > MAX_LENGTH) {
-            return json.substring(0, MAX_LENGTH) + "... [REDACTED]";
+            return json.substring(0, MAX_LENGTH) + "... [truncated]";
         }
         return json;
     }

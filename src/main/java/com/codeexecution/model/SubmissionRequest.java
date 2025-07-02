@@ -1,67 +1,96 @@
 package com.codeexecution.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Data;
-import lombok.Builder;
-import lombok.NoArgsConstructor;
+import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
+/**
+ * Represents a code submission request to Judge0.
+ * All fields are optional except source_code and language_id.
+ */
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
 public class SubmissionRequest {
+    
+    /**
+     * Source code to be executed
+     */
+    @NotBlank(message = "Source code is required")
     @JsonProperty("source_code")
     private String sourceCode;
 
+    /**
+     * Language ID (defaults to Java 11)
+     */
+    @Builder.Default
     @JsonProperty("language_id")
-    private Integer languageId;
+    private Integer languageId = 62; // Default to Java 11
 
+    /**
+     * Standard input for the program
+     */
     @JsonProperty("stdin")
     private String stdin;
 
+    /**
+     * Expected output for the test case (used for checking correctness)
+     */
     @JsonProperty("expected_output")
     private String expectedOutput;
 
+    /**
+     * CPU time limit in seconds
+     */
     @JsonProperty("cpu_time_limit")
     private Double cpuTimeLimit;
 
-    @JsonProperty("cpu_extra_time")
-    private Double cpuExtraTime;
-
-    @JsonProperty("wall_time_limit")
-    private Double wallTimeLimit;
-
+    /**
+     * Memory limit in KB
+     */
     @JsonProperty("memory_limit")
     private Integer memoryLimit;
 
-    @JsonProperty("stack_limit")
-    private Integer stackLimit;
+    /**
+     * Whether to wait for execution to complete (synchronous mode)
+     */
+    @Builder.Default
+    @JsonProperty("wait")
+    private Boolean wait = true;
 
-    @JsonProperty("max_processes_and_or_threads")
-    private Integer maxProcessesAndOrThreads;
+    /**
+     * Whether the source code is base64 encoded
+     */
+    @Builder.Default
+    @JsonProperty("base64_encoded")
+    private Boolean base64Encoded = false;
 
-    @JsonProperty("enable_per_process_and_thread_time_limit")
-    private Boolean enablePerProcessAndThreadTimeLimit;
-
-    @JsonProperty("enable_per_process_and_thread_memory_limit")
-    private Boolean enablePerProcessAndThreadMemoryLimit;
-
-    @JsonProperty("max_file_size")
-    private Integer maxFileSize;
-
+    /**
+     * Whether to redirect stderr to stdout
+     */
+    @Builder.Default
     @JsonProperty("redirect_stderr_to_stdout")
-    private Boolean redirectStderrToStdout;
+    private Boolean redirectStderrToStdout = true;
 
-    @JsonProperty("enable_network")
-    private Boolean enableNetwork;
+    /**
+     * Callback URL for asynchronous execution
+     */
+    @JsonProperty("callback_url")
+    private String callbackUrl;
 
+    /**
+     * Number of runs
+     */
     @JsonProperty("number_of_runs")
     private Integer numberOfRuns;
 
+    /**
+     * Additional files
+     */
     @JsonProperty("additional_files")
     private String additionalFiles;
-
-    @JsonProperty("callback_url")
-    private String callbackUrl;
 }

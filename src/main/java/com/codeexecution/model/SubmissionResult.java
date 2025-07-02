@@ -1,8 +1,13 @@
 package com.codeexecution.model;
 
+import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 @Data
+@AllArgsConstructor
+@Builder
 public class SubmissionResult {
     private String stdout;
     private String stderr;
@@ -19,6 +24,8 @@ public class SubmissionResult {
     private Double memory;
 
     @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
     public static class Status {
         private Integer id;
         private String description;
